@@ -72,6 +72,72 @@ static void locate_block_device (enum block_type, const char *name);
 
 int pintos_init (void) NO_RETURN;
 
+void run_interactive_shell(void){
+  char buffer[128];
+  int pos=0;
+
+  printf("CS2042> ");
+  
+  while(true){
+    uint8_t c=input_getc();
+
+    if(c=='\r' || c=='\n'){
+      printf("\n");
+      buffer[pos]='\0';
+
+      if(pos>0){
+        if(strcmp(buffer, "whoami")==0){
+          printf("Vibodha Lakshan - [240225J]\n");
+        }
+
+        else if (strcmp(buffer, "shutdown")==0){
+          shutdown_power_off();
+        }
+
+        else if(strcmp(buffer,"time")==0){
+          printf("%llu\n", rtc_get_time());
+        }
+
+        else if(strcmp(buffer,"ram")==0){
+          printf("%"PRIu32" kb\n", init_ram_pages*4 );
+        }
+        
+        else if(strcmp(buffer,"thread")==0){
+          thread_print_stats();
+        }
+
+        else if(strcmp(buffer,"priority")==0){
+          printf("%d\n", thread_get_priority());
+        }
+
+        else if(strcmp(buffer,"exit")==0){
+          printf("Exiting interactive shell... Byef\n");
+          break;
+        }
+
+        else{
+          printf("Unknown command: %s\n", buffer);
+        }
+      }
+
+      pos=0;
+      if(strcmp(buffer,"exit") !=0){
+        printf("CS2042> ");
+      }
+    }
+    else if(c=='\b' && pos>0){
+      pos--;
+      printf("\b \b");
+    }
+
+    else if(c!='\b' && pos<sizeof(buffer)-1){
+      buffer[pos++]=c;
+      printf("%c", c);
+    }
+
+  }
+}
+
 /* Pintos main entry point. */
 int
 pintos_init (void)
@@ -133,6 +199,7 @@ pintos_init (void)
     /* Run actions specified on kernel command line. */
     run_actions (argv);
   } else {
+    run_interactive_shell();
     // TODO: no command line passed to kernel. Run interactively 
   }
 
