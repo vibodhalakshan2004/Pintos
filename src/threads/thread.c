@@ -370,12 +370,12 @@ thread_set_priority (int new_priority)
     if(highest_ready->priority>current->priority){
       should_yeild=true;
     }
-
+  }
     intr_set_level(old_level);
 
     if(should_yeild)
       thread_yield();
-  }
+  
 
 }
 
