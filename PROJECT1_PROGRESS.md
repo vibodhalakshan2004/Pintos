@@ -357,6 +357,38 @@ The following test and regressions passed after this implementation:
 - `priority-fifo`
 - `alarm-simultaneous`
 
+## Priority-donation data model
+
+Status: data structures added and regression-tested; donation behavior is not
+connected to locks yet.
+
+`struct thread` now distinguishes its normal priority from its effective
+scheduler priority:
+
+- `base_priority` stores the priority requested by thread creation or
+  `thread_set_priority()` when no donation is considered.
+- `priority` remains the effective priority used by scheduling decisions.
+- `waiting_lock` points to the lock the thread is currently attempting to
+  acquire, or is `NULL` when it is not waiting for a lock.
+- `donations` is the list of threads currently donating to this thread.
+- `donation_elem` lets a donor appear in another thread's donation list while
+  its existing `elem` is used by a semaphore waiter list or ready list.
+
+`struct lock` is forward-declared in `thread.h`, allowing `struct thread` to
+store a lock pointer without introducing a circular header dependency.
+
+`init_thread()` initializes `base_priority` to the initial effective priority,
+sets `waiting_lock` to `NULL`, and initializes the donations list. The new
+fields currently have no scheduling effect; the next stage connects them to
+lock acquisition and release.
+
+The following regressions passed after adding these fields:
+
+- `priority-condvar`
+- `priority-sema`
+- `priority-preempt`
+- `alarm-single`
+
 ## Thread list membership
 
 Each thread contains two embedded list elements:
@@ -428,9 +460,9 @@ result file.
 
 Continue in small, tested stages:
 
-1. Study priority inversion with a low-priority lock holder and a
-   high-priority waiter.
-2. Add priority donation for one lock.
+1. Add direct priority donation when a higher-priority thread waits for one
+   held lock.
+2. Remove the lock's donations and restore effective priority on release.
 3. Support removing/restoring donations when locks are released.
 4. Support multiple donations.
 5. Support nested donation, with a reasonable depth limit if needed.
@@ -445,7 +477,7 @@ Continue in small, tested stages:
 - Lock priority donation
 - Multiple priority donations
 - Nested priority donation
-- Base/original priority tracking for donation restoration
+- Applying base priority correctly while donations are active
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 
