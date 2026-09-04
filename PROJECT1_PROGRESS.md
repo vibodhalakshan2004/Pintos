@@ -1,6 +1,6 @@
 # Pintos Project 1: Threads — Progress Notes
 
-Last updated: September 2, 2026
+Last updated: September 5, 2026
 
 This document records the work completed so far for Johns Hopkins Pintos
 Project 1. It describes the implementation currently present in this
@@ -251,7 +251,9 @@ The repository contains passing results for:
 These verify creation-time preemption, yielding after lowering priority, and
 round-robin behavior among equal-priority threads.
 
-## Semaphores: concepts studied, implementation pending
+## Priority-aware semaphores
+
+Status: implemented and tested.
 
 A semaphore contains:
 
@@ -282,10 +284,31 @@ thread_unblock()
 ready_list
 ```
 
-The current semaphore implementation is still FIFO. It uses
-`list_push_back()` in `sema_down()` and `list_pop_front()` in `sema_up()`.
-It does not yet guarantee that the highest-priority waiter wakes first, and it
-does not yet cause immediate preemption after waking a higher-priority waiter.
+The original semaphore implementation was FIFO. It used `list_push_back()` in
+`sema_down()` and `list_pop_front()` in `sema_up()`, so the oldest waiter woke
+regardless of priority.
+
+A thread-priority comparator was added to `synch.c`. `sema_down()` now uses
+`list_insert_ordered()` to place blocked threads into the semaphore waiters
+list from highest to lowest priority. `sema_up()` also sorts the waiter list
+immediately before selecting its front element. Sorting at wake-up time is
+important because a blocked thread's effective priority may later change due
+to priority donation.
+
+After removing the highest-priority waiter, `sema_up()` calls
+`thread_unblock()`. It records whether the awakened thread has a higher
+priority than the running thread, finishes the semaphore update, and restores
+the previous interrupt level before preempting.
+
+- In normal thread context it calls `thread_yield()`.
+- In interrupt context it calls `intr_yield_on_return()` because an interrupt
+  handler cannot call `thread_yield()` directly.
+
+`thread_unblock()` only changes a waiter from `THREAD_BLOCKED` to
+`THREAD_READY`; it does not directly transfer a semaphore permit. Therefore,
+`sema_up()` still increments `value`. When the awakened thread runs, it
+rechecks the `while (value == 0)` condition and decrements the available
+permit itself.
 
 Semaphores are used for:
 
@@ -297,6 +320,42 @@ Semaphores are used for:
 
 `sema_down()` may block, so it cannot be called from an interrupt handler.
 `sema_up()` does not block and may be called from an interrupt handler.
+
+The following test and regressions passed after this implementation:
+
+- `priority-sema`
+- `priority-change`
+- `priority-preempt`
+- `alarm-simultaneous`
+
+## Priority-aware condition variables
+
+Status: implemented and tested.
+
+The original condition-variable implementation kept `struct semaphore_elem`
+waiters in FIFO order. A `thread` pointer was added to each
+`struct semaphore_elem` so that condition-variable code can find the priority
+of the thread represented by that waiting ticket.
+
+`cond_wait()` now records `thread_current()` in its local waiter and inserts
+the waiter into `cond->waiters` using a condition-waiter priority comparator.
+The condition list contains `semaphore_elem.elem`, while each private
+semaphore's waiter list contains the blocked thread's `thread.elem`. Separate
+embedded list elements are necessary because one list element cannot belong
+to two lists simultaneously.
+
+`cond_signal()` sorts the condition waiters immediately before selecting the
+front waiter. It then calls `sema_up()` on that waiter's private semaphore.
+The private semaphore provides the actual block/wakeup operation, while the
+associated lock protects the shared state and the condition variable
+organizes threads waiting for that state to change.
+
+The following test and regressions passed after this implementation:
+
+- `priority-condvar`
+- `priority-sema`
+- `priority-fifo`
+- `alarm-simultaneous`
 
 ## Thread list membership
 
@@ -350,13 +409,13 @@ alarm-priority
 priority-preempt
 priority-change
 priority-fifo
+priority-sema
+priority-condvar
 ```
 
 Known failing or unfinished areas currently include:
 
 ```text
-priority-sema
-priority-condvar
 priority donation tests
 MLFQS tests
 ```
@@ -369,26 +428,20 @@ result file.
 
 Continue in small, tested stages:
 
-1. Make semaphore waiters priority-aware.
-2. Make `sema_up()` yield when it wakes a higher-priority thread, using
-   `intr_yield_on_return()` when called from interrupt context.
-3. Run `priority-sema` and regression tests.
-4. Make condition-variable signaling wake the highest-priority waiter.
-5. Study priority inversion with a low-priority lock holder and a
+1. Study priority inversion with a low-priority lock holder and a
    high-priority waiter.
-6. Add priority donation for locks.
-7. Support removing/restoring donations when locks are released.
-8. Support multiple donations.
-9. Support nested donation, with a reasonable depth limit if needed.
-10. Run the complete priority test group.
-11. Implement the advanced/MLFQS scheduler only after priority scheduling is
+2. Add priority donation for one lock.
+3. Support removing/restoring donations when locks are released.
+4. Support multiple donations.
+5. Support nested donation, with a reasonable depth limit if needed.
+6. Verify donation when a lock holder is blocked on a semaphore.
+7. Run the complete priority test group.
+8. Implement the advanced/MLFQS scheduler only after priority scheduling is
     stable.
-12. Complete the required `src/threads/DESIGNDOC` as work progresses.
+9. Complete the required `src/threads/DESIGNDOC` as work progresses.
 
 ## Work not yet implemented
 
-- Priority-aware semaphore wake-up ordering
-- Priority-aware condition-variable signaling
 - Lock priority donation
 - Multiple priority donations
 - Nested priority donation

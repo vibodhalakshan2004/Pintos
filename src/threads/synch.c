@@ -290,7 +290,22 @@ struct semaphore_elem
   {
     struct list_elem elem;              /* List element. */
     struct semaphore semaphore;         /* This semaphore. */
+    struct thread *thread;              /* Thread waiting on condition. */
   };
+
+/* Returns true if condition waiter A has a higher priority than B. */
+static bool
+semaphore_elem_priority_more (const struct list_elem *a,
+                              const struct list_elem *b,
+                              void *aux UNUSED)
+{
+  struct semaphore_elem *waiter_a =
+    list_entry (a, struct semaphore_elem, elem);
+  struct semaphore_elem *waiter_b =
+    list_entry (b, struct semaphore_elem, elem);
+
+  return waiter_a->thread->priority > waiter_b->thread->priority;
+}
 
 /* Initializes condition variable COND.  A condition variable
    allows one piece of code to signal a condition and cooperating
@@ -333,8 +348,9 @@ cond_wait (struct condition *cond, struct lock *lock)
   ASSERT (!intr_context ());
   ASSERT (lock_held_by_current_thread (lock));
   
+  waiter.thread=thread_current();
   sema_init (&waiter.semaphore, 0);
-  list_push_back (&cond->waiters, &waiter.elem);
+  list_insert_ordered(&cond->waiters,&waiter.elem,semaphore_elem_priority_more,NULL);
   lock_release (lock);
   sema_down (&waiter.semaphore);
   lock_acquire (lock);
@@ -348,16 +364,28 @@ cond_wait (struct condition *cond, struct lock *lock)
    make sense to try to signal a condition variable within an
    interrupt handler. */
 void
-cond_signal (struct condition *cond, struct lock *lock UNUSED) 
+cond_signal (struct condition *cond, struct lock *lock UNUSED)
 {
+  struct semaphore_elem *waiter;
+
   ASSERT (cond != NULL);
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (lock_held_by_current_thread (lock));
 
-  if (!list_empty (&cond->waiters)) 
-    sema_up (&list_entry (list_pop_front (&cond->waiters),
-                          struct semaphore_elem, elem)->semaphore);
+  if (!list_empty (&cond->waiters))
+    {
+      /* A waiter's priority may have changed while blocked. */
+      list_sort (&cond->waiters,
+                 semaphore_elem_priority_more,
+                 NULL);
+
+      waiter = list_entry (list_pop_front (&cond->waiters),
+                           struct semaphore_elem,
+                           elem);
+
+      sema_up (&waiter->semaphore);
+    }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
