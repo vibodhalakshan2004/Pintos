@@ -100,8 +100,10 @@ The timer interrupt now:
 1. Increments the global timer tick.
 2. Examines the front of `sleeping_threads`.
 3. Removes and unblocks every thread with `wake_tick <= ticks`.
-4. Stops as soon as the front thread is not ready, because the list is sorted.
-5. Calls the original `thread_tick()` for scheduler accounting and time-slice
+4. Requests a yield on interrupt return if an awakened thread has a higher
+   effective priority than the interrupted thread.
+5. Stops as soon as the front thread is not ready, because the list is sorted.
+6. Calls the original `thread_tick()` for scheduler accounting and time-slice
    enforcement.
 
 ### Alarm Clock data flow
@@ -530,21 +532,35 @@ passed all six alarm tests and the five other priority tests. All 18
 alarm/priority results therefore pass for the current build. This does not
 prove that every scheduling edge case is handled.
 
-## Scheduling review: next small correction
+## Timer wake-up priority preemption
 
-The current `timer_interrupt()` unblocks expired sleepers but does not request
-preemption when a newly ready thread outranks the interrupted thread.
+Status: implemented and built successfully. All 18 alarm/priority tests were
+freshly rerun with QEMU after this change and passed (six alarm tests, five
+basic/synchronization priority tests, and seven donation tests).
+
+Previously, `timer_interrupt()` unblocked expired sleepers without requesting
+preemption when a newly ready thread outranked the interrupted thread.
 `thread_unblock()` intentionally does not preempt, and `thread_tick()` only
-requests a yield when the time slice expires. A higher-priority sleeper can
+requests a yield when the time slice expires. A higher-priority sleeper could
 therefore wait for the remaining time slice instead of running immediately
 after interrupt return.
 
-Next proposed change, not yet implemented: after unblocking each sleeper,
-compare its effective priority with `thread_current()->priority` and call
-`intr_yield_on_return()` if it is higher. This requests a switch after the
-handler finishes; it does not call `thread_yield()` inside an interrupt.
-The existing alarm tests pass without this correction, so their success alone
-does not establish immediate wake-up preemption.
+After unblocking each sleeper, `timer_interrupt()` now compares its effective
+priority with `thread_current()->priority` and calls `intr_yield_on_return()`
+if it is higher. This requests a switch after the handler finishes; it does
+not call `thread_yield()` inside an interrupt. Equal priorities do not request
+additional preemption. The wake-up loop still processes all expired sleepers,
+and the original `thread_tick()` call remains intact.
+
+The existing alarm tests also passed without this correction, so their success
+alone does not establish immediate wake-up preemption. The correction follows
+from inspection of the timer, unblock, and interrupt-return scheduling paths;
+a dedicated immediate-preemption timing test has not been added.
+
+Only this timer source change was implemented by the assistant with explicit
+user permission. No commit was created.
+
+## Next scheduling review: thread creation
 
 The thread-creation path also needs a later lifetime review: it currently
 reads `t->priority` after making the new thread runnable. An intervening
@@ -554,14 +570,15 @@ timer-driven switch could allow that thread to run and exit before the read.
 
 Continue in small, tested stages:
 
-1. Add immediate priority preemption on timer wake-up and rerun regressions.
+1. Protect the thread-creation priority check from a new thread exiting before
+   its priority is read, then rerun creation and scheduling regressions.
 2. Finish scheduling/lifetime edge-case review and targeted verification.
 3. Implement the advanced/MLFQS scheduler after priority scheduling is stable.
 4. Complete the required `src/threads/DESIGNDOC` as work progresses.
 
 ## Work not yet implemented
 
-- Timer wake-up priority preemption correction
+- Thread-creation lifetime correction
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 
@@ -580,7 +597,7 @@ git diff --check
 Also review every modified block against the surrounding Pintos style. Style
 cleanup should not change scheduler behavior.
 
-The nested-donation diff currently has trailing whitespace on the blank line
+The existing nested-donation code has trailing whitespace on the blank line
 after the donor-list insertion in `lock_acquire()`, and its closing brace
-needs alignment. These are left for the user to fix; no source code was
-edited while updating this document.
+needs alignment. These unrelated style issues were left unchanged during the
+timer preemption correction.

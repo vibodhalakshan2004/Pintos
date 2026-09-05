@@ -227,6 +227,10 @@ timer_interrupt (struct intr_frame *args UNUSED)
 
       /* Change the thread from BLOCKED to READY. */
       thread_unblock (t);
+
+      /* Request preemption if the awakened thread outranks us. */
+      if (t->priority > thread_current ()->priority)
+        intr_yield_on_return ();
     }
 
   thread_tick ();
