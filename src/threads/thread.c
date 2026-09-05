@@ -171,6 +171,8 @@ thread_create (const char *name, int priority,
   struct switch_entry_frame *ef;
   struct switch_threads_frame *sf;
   tid_t tid;
+  enum intr_level old_level;
+  bool should_yield;
 
   ASSERT (function != NULL);
 
@@ -198,13 +200,14 @@ thread_create (const char *name, int priority,
   sf->eip = switch_entry;
   sf->ebp = 0;
 
-  /* Add to run queue. */
+  /* Make the thread ready and inspect it before it can run. */
+  old_level = intr_disable ();
   thread_unblock (t);
+  should_yield = t->priority > thread_current ()->priority;
+  intr_set_level (old_level);
 
-/* Yield if the new thread has a higher priority. */
-  if (t->priority > thread_current ()->priority)
+  if (should_yield)
     thread_yield ();
-
 
   return tid;
 }

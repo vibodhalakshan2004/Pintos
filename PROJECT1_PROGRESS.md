@@ -197,7 +197,10 @@ among threads of the same priority.
 ### Preemption when creating a thread
 
 After `thread_create()` calls `thread_unblock()` for a new thread, it compares
-the new thread's priority with the current thread's priority.
+the new thread's priority with the current thread's priority. Interrupts stay
+disabled across both operations, and the comparison is saved in
+`should_yield` before the previous interrupt level is restored. This prevents
+reading the new thread's memory after it has had a chance to run and exit.
 
 If the new thread has a strictly higher priority, the current thread calls
 `thread_yield()`. The ordered ready list then causes the new higher-priority
@@ -560,25 +563,64 @@ a dedicated immediate-preemption timing test has not been added.
 Only this timer source change was implemented by the assistant with explicit
 user permission. No commit was created.
 
-## Next scheduling review: thread creation
+## Thread-creation lifetime correction
 
-The thread-creation path also needs a later lifetime review: it currently
-reads `t->priority` after making the new thread runnable. An intervening
-timer-driven switch could allow that thread to run and exit before the read.
+Status: implemented and built successfully. All 18 alarm/priority tests were
+freshly rerun with QEMU after this correction and passed. `git diff --check`
+also passed for this change.
+
+Previously, the creation path read `t->priority` after making the new thread
+runnable with interrupts potentially enabled. An intervening timer-driven
+switch could allow that thread to run, exit, and have its memory freed before
+the read. Accessing that memory would be a use-after-free.
+
+`thread_create()` now saves the old interrupt level and disables interrupts
+before calling `thread_unblock()`. It then records the priority comparison in
+the local Boolean `should_yield`, restores the previous interrupt level, and
+yields if needed. No access to `t` occurs after interrupts are restored.
+`thread_unblock()` preserves the caller's disabled interrupt state and does
+not itself preempt, so the thread cannot run during the protected comparison.
+
+The source change was explicitly authorized by the user. Only `thread.c` and
+this document were edited for this step; no commit was created. Existing
+regression tests do not specifically force the original rare race; the
+lifetime fix is additionally justified by inspecting the protected sequence.
+
+## Next foundation: MLFQS fixed-point arithmetic
+
+Status: not implemented. The nice/load-average/recent-CPU functions in
+`thread.c` are still stubs. No fixed-point helper header is present yet.
+
+The next small stage is to add and independently test fixed-point helpers,
+starting with integer conversion, truncation toward zero, and rounding to
+nearest. A proposed location is `src/threads/fixed-point.h`. This stage should
+not change scheduling behavior or enable MLFQS yet.
+
+MLFQS needs fractional `recent_cpu` and `load_avg` values without using kernel
+floating-point arithmetic. In 17.14 representation, the stored integer is
+scaled by 16384: 1 is stored as 16384, and 1.5 as 24576. Conversion tests
+should include positive, negative, zero, and half-integer cases.
+
+Reference: [Johns Hopkins Pintos scheduler appendix, section B.6](https://jhuopsys.github.io/spring2026/assign/pintos/pintos_8.html).
+The online appendix was consulted because the originally supplied local PDF
+path was unavailable during the preceding review; it is supplementary and
+does not replace any course-specific requirements in the user's PDF.
 
 ## Next implementation steps
 
 Continue in small, tested stages:
 
-1. Protect the thread-creation priority check from a new thread exiting before
-   its priority is read, then rerun creation and scheduling regressions.
-2. Finish scheduling/lifetime edge-case review and targeted verification.
-3. Implement the advanced/MLFQS scheduler after priority scheduling is stable.
+1. Implement and independently test fixed-point arithmetic helpers in small
+   stages, beginning with conversions and rounding.
+2. Implement MLFQS fields, formulas, timer updates, and public getters/setters
+   incrementally, preserving normal priority scheduling when MLFQS is off.
+3. Continue scheduling edge-case review and targeted verification alongside
+   the full regression tests before submission.
 4. Complete the required `src/threads/DESIGNDOC` as work progresses.
 
 ## Work not yet implemented
 
-- Thread-creation lifetime correction
+- Fixed-point arithmetic helpers
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 
