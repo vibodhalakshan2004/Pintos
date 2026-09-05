@@ -588,18 +588,55 @@ lifetime fix is additionally justified by inspecting the protected sequence.
 
 ## Next foundation: MLFQS fixed-point arithmetic
 
-Status: not implemented. The nice/load-average/recent-CPU functions in
-`thread.c` are still stubs. No fixed-point helper header is present yet.
+Status: helper header implemented and syntax-checked; it is not connected to
+the scheduler yet. The nice/load-average/recent-CPU functions in `thread.c`
+remain stubs.
 
-The next small stage is to add and independently test fixed-point helpers,
-starting with integer conversion, truncation toward zero, and rounding to
-nearest. A proposed location is `src/threads/fixed-point.h`. This stage should
-not change scheduling behavior or enable MLFQS yet.
+`src/threads/fixed-point.h` defines a signed `fixed_t` based on `int32_t` and
+uses 17.14 representation with a scaling factor of 16384. It provides:
+
+- conversion from an integer to fixed point;
+- conversion toward zero and conversion rounded to nearest;
+- fixed-point addition and subtraction;
+- addition and subtraction between fixed-point and integer values;
+- fixed-point multiplication and division;
+- multiplication and division between fixed-point and integer values.
+
+Fixed-point multiplication and division use `int64_t` intermediate values to
+avoid overflowing a 32-bit temporary before the result is scaled back down.
+The header uses `static inline` functions so it can be safely included in
+multiple C translation units while keeping the helpers small and type-checked.
+
+The header passed a direct `i386-elf-gcc` syntax check. It is currently an
+untracked file. It is included by `thread.h`, so a forced Pintos rebuild
+parses it throughout the kernel. Its missing final newline has been fixed.
 
 MLFQS needs fractional `recent_cpu` and `load_avg` values without using kernel
 floating-point arithmetic. In 17.14 representation, the stored integer is
 scaled by 16384: 1 is stored as 16384, and 1.5 as 24576. Conversion tests
 should include positive, negative, zero, and half-integer cases.
+
+The fraction remains available while a value stays in `fixed_t` form. Public
+Pintos getters later preserve two decimal places by multiplying the fixed
+value by 100 before converting it to an ordinary integer. For example, a
+fixed-point value representing 1.75 is returned as integer 175.
+
+Per-thread `nice` and `recent_cpu` fields, their zero initialization, and
+MLFQS inheritance by newly created threads have been added. The single
+system-wide `load_avg` is declared `static` in `thread.c` and initialized to
+fixed-point zero in `thread_init()`.
+
+An initial review found `static load_avg` incorrectly declared in `thread.h`,
+which gave every C translation unit a separate private copy and generated
+many unused-variable warnings. With explicit user permission, the assistant
+moved the definition into `thread.c` and fixed the final newline in
+`fixed-point.h`. A forced rebuild completed successfully without any
+`load_avg` warnings. The pre-existing unrelated warnings in `init.c`, `ide.c`,
+and debugging/library code remain outside this step.
+
+After the correction, all 18 alarm and normal-priority tests were freshly run
+with QEMU and passed. MLFQS tests are not expected to pass yet because the
+formulas and timer updates are still unimplemented.
 
 Reference: [Johns Hopkins Pintos scheduler appendix, section B.6](https://jhuopsys.github.io/spring2026/assign/pintos/pintos_8.html).
 The online appendix was consulted because the originally supplied local PDF
@@ -610,9 +647,9 @@ does not replace any course-specific requirements in the user's PDF.
 
 Continue in small, tested stages:
 
-1. Implement and independently test fixed-point arithmetic helpers in small
-   stages, beginning with conversions and rounding.
-2. Implement MLFQS fields, formulas, timer updates, and public getters/setters
+1. Implement a helper that calculates and clamps one thread's MLFQS priority
+   from `recent_cpu` and `nice`, then use it during MLFQS initialization.
+2. Implement MLFQS formulas, timer updates, and public getters/setters
    incrementally, preserving normal priority scheduling when MLFQS is off.
 3. Continue scheduling edge-case review and targeted verification alongside
    the full regression tests before submission.
@@ -620,7 +657,7 @@ Continue in small, tested stages:
 
 ## Work not yet implemented
 
-- Fixed-point arithmetic helpers
+- MLFQS state fields and initialization
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 

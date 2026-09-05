@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/fixed-point.h"
 
 struct lock;
 
@@ -91,6 +92,8 @@ struct thread
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
     int base_priority;                  /* Priority without donations. */
+    int nice;                           /* Thread niceness from -20 to 20. */
+    fixed_t recent_cpu;                 /* Recent CPU usage in fixed point. */
     struct lock *waiting_lock;          /* Lock this thread is waiting for. */
     struct list donations;              /* Threads donating to this thread. */
     struct list_elem donation_elem;     /* Element in another thread's donations. */
