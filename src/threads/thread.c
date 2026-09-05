@@ -419,8 +419,7 @@ thread_foreach (thread_action_func *func, void *aux)
 }
 
 /* Sets the current thread's base priority to NEW_PRIORITY,
-   preserving any higher active donation.
-   Has no effect when MLFQS is enabled. */
+   preserving any higher active donation. */
 void
 thread_set_priority (int new_priority)
 {
@@ -431,15 +430,19 @@ thread_set_priority (int new_priority)
 
   ASSERT (PRI_MIN <= new_priority && new_priority <= PRI_MAX);
 
-  /* MLFQS calculates priorities automatically. */
-  if (thread_mlfqs)
-    return;
-
   old_level = intr_disable ();
   current = thread_current ();
 
   current->base_priority = new_priority;
   current->priority = new_priority;
+
+  ASSERT (PRI_MIN <= new_priority && new_priority <= PRI_MAX);
+
+/* MLFQS calculates priorities automatically. */
+if (thread_mlfqs)
+  return;
+
+old_level = intr_disable ();
 
   /* Keep any donation that is higher than the new base priority. */
   for (e = list_begin (&current->donations);
