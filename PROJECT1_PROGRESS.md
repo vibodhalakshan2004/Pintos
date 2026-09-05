@@ -145,8 +145,9 @@ which is evidence that busy waiting was removed.
 ## Part 2: Basic Priority Scheduling
 
 Status: basic ready-list ordering, creation-time preemption, and
-priority-aware synchronization are implemented. Direct and multiple donation
-tests pass; nested donation and a full scheduling review remain.
+priority-aware synchronization are implemented. Direct, multiple, and nested
+donation tests pass. All 18 alarm/priority tests have passing results for the
+current build; scheduling edge-case review remains.
 
 Pintos priorities range from `PRI_MIN` (0) to `PRI_MAX` (63). A larger number
 means a higher priority.
@@ -362,8 +363,8 @@ The following test and regressions passed after this implementation:
 
 ## Priority-donation data model
 
-Status: connected to lock acquisition/release and priority changes; direct
-and multiple donation tests pass. Nested propagation is the next stage.
+Status: connected to lock acquisition/release and priority changes; direct,
+multiple, and nested donation tests pass.
 
 `struct thread` now distinguishes its normal priority from its effective
 scheduler priority:
@@ -393,7 +394,7 @@ The following regressions passed after adding these fields:
 ## Direct and multiple priority donation
 
 Status: implemented and tested, including donation to a lock holder blocked
-on a semaphore. Nested donation is not yet implemented.
+on a semaphore. Nested propagation is described below.
 
 In `lock_acquire()`, a thread encountering an occupied lock records that lock
 in `waiting_lock` and adds its `donation_elem` to the holder's `donations`.
@@ -414,6 +415,27 @@ whose priority increased through donation.
 `thread_set_priority()` changes the base priority without discarding active
 donations. `next_thread_to_run()` re-sorts ready threads to account for
 effective priorities changing after insertion.
+
+## Nested priority donation
+
+Status: implemented; `priority-donate-nest` and `priority-donate-chain` pass.
+
+`donate_priority()` in `synch.c` follows each donor's `waiting_lock` to its
+holder. It raises that holder's effective priority if necessary, then treats
+the holder as the next donor. Traversal stops when there is no waiting lock,
+no holder, or eight holders have been visited. The helper asserts that
+interrupts are already disabled; it does not disable them itself.
+
+For example, H (priority 50) waits for a lock held by M (priority 30), while M
+waits for a lock held by L (priority 10). The helper propagates priority 50
+through M to L, allowing the dependency preventing H from running to receive
+the appropriate scheduling priority. Base priorities do not change.
+
+`lock_acquire()` calls this helper after recording the waiting lock and
+inserting the direct donor into the holder's donation list. The helper does
+not add list entries: H belongs to M's donor list, and M belongs to L's donor
+list. This preserves the rule that one `donation_elem` cannot occupy multiple
+lists simultaneously.
 
 ## Thread list membership
 
@@ -488,13 +510,13 @@ priority-donate-lower
 priority-donate-multiple
 priority-donate-multiple2
 priority-donate-sema
+priority-donate-nest
+priority-donate-chain
 ```
 
 Known failing or unfinished areas currently include:
 
 ```text
-priority-donate-nest
-priority-donate-chain
 MLFQS tests
 ```
 
@@ -502,26 +524,44 @@ A saved `.result` file describes the result of the build that produced it. A
 test should be rerun after relevant source changes before relying on an older
 result file.
 
-After the setter correction, the QEMU make/check run confirmed up-to-date
-passing results for `priority-donate-one`, `priority-donate-lower`,
-`priority-change`, `priority-condvar`, `priority-sema`, and `priority-preempt`.
-It also freshly ran and passed `priority-donate-multiple`,
-`priority-donate-multiple2`, and `priority-donate-sema`. Older alarm/FIFO
-results above are historical; a full regression run is still required.
+After nested donation was implemented, the QEMU make/check run confirmed
+up-to-date passing results for all seven donation tests. It freshly ran and
+passed all six alarm tests and the five other priority tests. All 18
+alarm/priority results therefore pass for the current build. This does not
+prove that every scheduling edge case is handled.
+
+## Scheduling review: next small correction
+
+The current `timer_interrupt()` unblocks expired sleepers but does not request
+preemption when a newly ready thread outranks the interrupted thread.
+`thread_unblock()` intentionally does not preempt, and `thread_tick()` only
+requests a yield when the time slice expires. A higher-priority sleeper can
+therefore wait for the remaining time slice instead of running immediately
+after interrupt return.
+
+Next proposed change, not yet implemented: after unblocking each sleeper,
+compare its effective priority with `thread_current()->priority` and call
+`intr_yield_on_return()` if it is higher. This requests a switch after the
+handler finishes; it does not call `thread_yield()` inside an interrupt.
+The existing alarm tests pass without this correction, so their success alone
+does not establish immediate wake-up preemption.
+
+The thread-creation path also needs a later lifetime review: it currently
+reads `t->priority` after making the new thread runnable. An intervening
+timer-driven switch could allow that thread to run and exit before the read.
 
 ## Next implementation steps
 
 Continue in small, tested stages:
 
-1. Propagate nested donation through a chain of lock holders, then run
-   `priority-donate-nest`, `priority-donate-chain`, and donation regressions.
-2. Review scheduling/preemption paths and run all priority and alarm tests.
+1. Add immediate priority preemption on timer wake-up and rerun regressions.
+2. Finish scheduling/lifetime edge-case review and targeted verification.
 3. Implement the advanced/MLFQS scheduler after priority scheduling is stable.
 4. Complete the required `src/threads/DESIGNDOC` as work progresses.
 
 ## Work not yet implemented
 
-- Nested priority donation
+- Timer wake-up priority preemption correction
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 
@@ -539,3 +579,8 @@ git diff --check
 
 Also review every modified block against the surrounding Pintos style. Style
 cleanup should not change scheduler behavior.
+
+The nested-donation diff currently has trailing whitespace on the blank line
+after the donor-list insertion in `lock_acquire()`, and its closing brace
+needs alignment. These are left for the user to fix; no source code was
+edited while updating this document.

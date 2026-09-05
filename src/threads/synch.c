@@ -88,6 +88,31 @@ refresh_priority (struct thread *thread)
     }
 }
 
+/* Propagates priority through at most eight lock holders. */
+static void
+donate_priority (struct thread *donor)
+{
+  int depth;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (depth = 0; depth < 8; depth++)
+    {
+      struct lock *lock = donor->waiting_lock;
+      struct thread *holder;
+
+      if (lock == NULL || lock->holder == NULL)
+        break;
+
+      holder = lock->holder;
+
+      if (holder->priority < donor->priority)
+        holder->priority = donor->priority;
+
+      donor = holder;
+    }
+}
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -290,10 +315,10 @@ lock_acquire (struct lock *lock)
 
       list_push_back (&lock->holder->donations,
                       &current->donation_elem);
+      
+      donate_priority (current);
 
-      if (current->priority > lock->holder->priority)
-        lock->holder->priority = current->priority;
-    }
+       }
 
   sema_down (&lock->semaphore);
 
