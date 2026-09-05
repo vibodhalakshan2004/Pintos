@@ -348,35 +348,54 @@ thread_foreach (thread_action_func *func, void *aux)
     }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
+/* Sets the current thread's base priority to NEW_PRIORITY,
+   preserving any higher active donation. */
 void
-thread_set_priority (int new_priority) 
+thread_set_priority (int new_priority)
 {
   struct thread *current;
-  struct thread *highest_ready=NULL;
+  struct list_elem *e;
   enum intr_level old_level;
-  bool should_yeild =false;
+  bool should_yield = false;
 
-  ASSERT(PRI_MIN<=new_priority && new_priority<=PRI_MAX);
+  ASSERT (PRI_MIN <= new_priority && new_priority <= PRI_MAX);
 
-  old_level=intr_disable();
+  old_level = intr_disable ();
+  current = thread_current ();
 
-  current= thread_current();
-  current->priority=new_priority;
+  current->base_priority = new_priority;
+  current->priority = new_priority;
 
-  if(!list_empty(&ready_list)){
-    highest_ready=list_entry(list_front(&ready_list),struct thread,elem);
+  /* Keep any donation that is higher than the new base priority. */
+  for (e = list_begin (&current->donations);
+       e != list_end (&current->donations);
+       e = list_next (e))
+    {
+      struct thread *donor =
+        list_entry (e, struct thread, donation_elem);
 
-    if(highest_ready->priority>current->priority){
-      should_yeild=true;
+      if (donor->priority > current->priority)
+        current->priority = donor->priority;
     }
-  }
-    intr_set_level(old_level);
 
-    if(should_yeild)
-      thread_yield();
-  
+  if (!list_empty (&ready_list))
+    {
+      struct thread *highest_ready;
 
+      /* Donation may have changed a ready thread's priority. */
+      list_sort (&ready_list, thread_priority_more, NULL);
+
+      highest_ready = list_entry (list_front (&ready_list),
+                                  struct thread,
+                                  elem);
+
+      should_yield = highest_ready->priority > current->priority;
+    }
+
+  intr_set_level (old_level);
+
+  if (should_yield)
+    thread_yield ();
 }
 
 /* Returns the current thread's priority. */
@@ -532,12 +551,19 @@ alloc_frame (struct thread *t, size_t size)
    will be in the run queue.)  If the run queue is empty, return
    idle_thread. */
 static struct thread *
-next_thread_to_run (void) 
+next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
   else
-    return list_entry (list_pop_front (&ready_list), struct thread, elem);
+    {
+      /* Donation may change the priority of a ready thread. */
+      list_sort (&ready_list, thread_priority_more, NULL);
+
+      return list_entry (list_pop_front (&ready_list),
+                         struct thread,
+                         elem);
+    }
 }
 
 /* Completes a thread switch by activating the new thread's page

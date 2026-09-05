@@ -144,8 +144,9 @@ which is evidence that busy waiting was removed.
 
 ## Part 2: Basic Priority Scheduling
 
-Status: partially implemented. Basic ready-list ordering and preemption are
-working. Priority-aware synchronization and donation remain unfinished.
+Status: basic ready-list ordering, creation-time preemption, and
+priority-aware synchronization are implemented. Direct and multiple donation
+tests pass; nested donation and a full scheduling review remain.
 
 Pintos priorities range from `PRI_MIN` (0) to `PRI_MAX` (63). A larger number
 means a higher priority.
@@ -182,8 +183,9 @@ in this order:
 highest priority -> ... -> lowest priority
 ```
 
-`next_thread_to_run()` still removes the front element. Because the list is
-ordered, the front element is now a highest-priority ready thread.
+`next_thread_to_run()` sorts the list before removing the front element.
+Donation can change a ready thread's priority after insertion, so this refresh
+ensures the selected thread still has a highest ready priority.
 
 The comparator uses `>` rather than `>=`. Equal-priority threads are inserted
 after existing equal-priority threads, preserving FIFO/round-robin behavior
@@ -206,8 +208,9 @@ Equal-priority creation does not force an immediate yield.
 
 1. Validates that the new value is between `PRI_MIN` and `PRI_MAX`.
 2. Disables interrupts while changing priority and examining `ready_list`.
-3. Updates the current thread's priority.
-4. If `ready_list` is nonempty, examines its front thread.
+3. Updates `base_priority` and recomputes effective `priority` as the maximum
+   of the new base priority and all current donor priorities.
+4. If `ready_list` is nonempty, sorts it and examines its front thread.
 5. Records whether the front thread now has a higher priority.
 6. Restores the previous interrupt level on every path.
 7. Calls `thread_yield()` if a higher-priority ready thread exists.
@@ -359,8 +362,8 @@ The following test and regressions passed after this implementation:
 
 ## Priority-donation data model
 
-Status: data structures added and regression-tested; donation behavior is not
-connected to locks yet.
+Status: connected to lock acquisition/release and priority changes; direct
+and multiple donation tests pass. Nested propagation is the next stage.
 
 `struct thread` now distinguishes its normal priority from its effective
 scheduler priority:
@@ -378,9 +381,7 @@ scheduler priority:
 store a lock pointer without introducing a circular header dependency.
 
 `init_thread()` initializes `base_priority` to the initial effective priority,
-sets `waiting_lock` to `NULL`, and initializes the donations list. The new
-fields currently have no scheduling effect; the next stage connects them to
-lock acquisition and release.
+sets `waiting_lock` to `NULL`, and initializes the donations list.
 
 The following regressions passed after adding these fields:
 
@@ -389,12 +390,38 @@ The following regressions passed after adding these fields:
 - `priority-preempt`
 - `alarm-single`
 
+## Direct and multiple priority donation
+
+Status: implemented and tested, including donation to a lock holder blocked
+on a semaphore. Nested donation is not yet implemented.
+
+In `lock_acquire()`, a thread encountering an occupied lock records that lock
+in `waiting_lock` and adds its `donation_elem` to the holder's `donations`.
+It raises the holder's effective priority if necessary, then uses
+`sema_down()` to wait for the lock. After acquiring it, the thread clears
+`waiting_lock` and becomes the holder. Donation is skipped in MLFQS mode.
+
+In `lock_release()`, `remove_lock_donations()` removes only donors waiting for
+the released lock. `refresh_priority()` recalculates the holder's effective
+priority from its base and remaining donors before the lock is made
+available through `sema_up()`. Interrupts are disabled around these updates.
+
+The donor list already supports several donors and several held locks.
+Releasing one lock therefore preserves donations associated with other locks.
+Sorting semaphore waiters before waking one also handles a blocked holder
+whose priority increased through donation.
+
+`thread_set_priority()` changes the base priority without discarding active
+donations. `next_thread_to_run()` re-sorts ready threads to account for
+effective priorities changing after insertion.
+
 ## Thread list membership
 
-Each thread contains two embedded list elements:
+Each thread now contains three embedded list elements:
 
 - `allelem` is used for the list of all threads.
 - `elem` is reused by state-dependent lists.
+- `donation_elem` belongs to the donation list of the relevant lock holder.
 
 Typical `elem` membership is:
 
@@ -429,7 +456,20 @@ list before inserting it into another.
 
 ## Current test snapshot
 
-Passing result files currently include:
+### Resolved regression during direct-donation implementation
+
+The first direct-donation implementation caused `priority-condvar` and
+`priority-sema` failures. The old `thread_set_priority()` updated only
+`priority`, while the new `lock_release()` restored priority from
+`base_priority`. After main lowered itself to 0, releasing the internal
+`tid_lock` during thread creation restored its stale base priority of 31.
+The test workers therefore did not preempt main as expected.
+
+The setter now updates base priority, recomputes effective priority from all
+active donors, and checks whether to yield. The correction is implemented;
+both synchronization regressions and `priority-donate-lower` now pass.
+
+Passing results from completed stages include:
 
 ```text
 alarm-single
@@ -443,12 +483,18 @@ priority-change
 priority-fifo
 priority-sema
 priority-condvar
+priority-donate-one
+priority-donate-lower
+priority-donate-multiple
+priority-donate-multiple2
+priority-donate-sema
 ```
 
 Known failing or unfinished areas currently include:
 
 ```text
-priority donation tests
+priority-donate-nest
+priority-donate-chain
 MLFQS tests
 ```
 
@@ -456,28 +502,26 @@ A saved `.result` file describes the result of the build that produced it. A
 test should be rerun after relevant source changes before relying on an older
 result file.
 
+After the setter correction, the QEMU make/check run confirmed up-to-date
+passing results for `priority-donate-one`, `priority-donate-lower`,
+`priority-change`, `priority-condvar`, `priority-sema`, and `priority-preempt`.
+It also freshly ran and passed `priority-donate-multiple`,
+`priority-donate-multiple2`, and `priority-donate-sema`. Older alarm/FIFO
+results above are historical; a full regression run is still required.
+
 ## Next implementation steps
 
 Continue in small, tested stages:
 
-1. Add direct priority donation when a higher-priority thread waits for one
-   held lock.
-2. Remove the lock's donations and restore effective priority on release.
-3. Support removing/restoring donations when locks are released.
-4. Support multiple donations.
-5. Support nested donation, with a reasonable depth limit if needed.
-6. Verify donation when a lock holder is blocked on a semaphore.
-7. Run the complete priority test group.
-8. Implement the advanced/MLFQS scheduler only after priority scheduling is
-    stable.
-9. Complete the required `src/threads/DESIGNDOC` as work progresses.
+1. Propagate nested donation through a chain of lock holders, then run
+   `priority-donate-nest`, `priority-donate-chain`, and donation regressions.
+2. Review scheduling/preemption paths and run all priority and alarm tests.
+3. Implement the advanced/MLFQS scheduler after priority scheduling is stable.
+4. Complete the required `src/threads/DESIGNDOC` as work progresses.
 
 ## Work not yet implemented
 
-- Lock priority donation
-- Multiple priority donations
 - Nested priority donation
-- Applying base priority correctly while donations are active
 - Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 

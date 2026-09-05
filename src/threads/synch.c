@@ -44,6 +44,49 @@ thread_priority_more (const struct list_elem *a,
   return thread_a->priority > thread_b->priority;
 }
 
+/* Removes donations from threads waiting for LOCK. */
+static void
+remove_lock_donations (struct thread *thread, struct lock *lock)
+{
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  for (e = list_begin (&thread->donations);
+       e != list_end (&thread->donations);)
+    {
+      struct thread *donor =
+        list_entry (e, struct thread, donation_elem);
+
+      if (donor->waiting_lock == lock)
+        e = list_remove (e);
+      else
+        e = list_next (e);
+    }
+}
+
+/* Restores THREAD's effective priority from its base priority
+   and any remaining donations. */
+static void
+refresh_priority (struct thread *thread)
+{
+  struct list_elem *e;
+
+  ASSERT (intr_get_level () == INTR_OFF);
+
+  thread->priority = thread->base_priority;
+
+  for (e = list_begin (&thread->donations);
+       e != list_end (&thread->donations);
+       e = list_next (e))
+    {
+      struct thread *donor =
+        list_entry (e, struct thread, donation_elem);
+
+      if (donor->priority > thread->priority)
+        thread->priority = donor->priority;
+    }
+}
 
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
@@ -231,12 +274,33 @@ lock_init (struct lock *lock)
 void
 lock_acquire (struct lock *lock)
 {
+  enum intr_level old_level;
+  struct thread *current;
+
   ASSERT (lock != NULL);
   ASSERT (!intr_context ());
   ASSERT (!lock_held_by_current_thread (lock));
 
+  old_level = intr_disable ();
+  current = thread_current ();
+
+  if (!thread_mlfqs && lock->holder != NULL)
+    {
+      current->waiting_lock = lock;
+
+      list_push_back (&lock->holder->donations,
+                      &current->donation_elem);
+
+      if (current->priority > lock->holder->priority)
+        lock->holder->priority = current->priority;
+    }
+
   sema_down (&lock->semaphore);
-  lock->holder = thread_current ();
+
+  current->waiting_lock = NULL;
+  lock->holder = current;
+
+  intr_set_level (old_level);
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -265,13 +329,27 @@ lock_try_acquire (struct lock *lock)
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock) 
+lock_release (struct lock *lock)
 {
+  enum intr_level old_level;
+  struct thread *current;
+
   ASSERT (lock != NULL);
   ASSERT (lock_held_by_current_thread (lock));
 
+  old_level = intr_disable ();
+  current = thread_current ();
+
+  if (!thread_mlfqs)
+    {
+      remove_lock_donations (current, lock);
+      refresh_priority (current);
+    }
+
   lock->holder = NULL;
   sema_up (&lock->semaphore);
+
+  intr_set_level (old_level);
 }
 
 /* Returns true if the current thread holds LOCK, false
