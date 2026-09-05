@@ -638,6 +638,184 @@ After the correction, all 18 alarm and normal-priority tests were freshly run
 with QEMU and passed. MLFQS tests are not expected to pass yet because the
 formulas and timer updates are still unimplemented.
 
+## MLFQS priority calculation
+
+Status: implemented and build-verified; periodic recalculation is not yet
+connected to timer ticks.
+
+`mlfqs_update_priority()` calculates one non-idle thread's effective priority
+using:
+
+```text
+priority = PRI_MAX - recent_cpu / 4 - nice * 2
+```
+
+The fixed-point `recent_cpu / 4` result is converted toward zero before the
+integer priority is calculated. The result is clamped to the inclusive range
+`PRI_MIN` through `PRI_MAX`. The helper requires interrupts to be disabled and
+leaves the idle thread unchanged.
+
+When MLFQS is enabled, `thread_init()` recalculates the initial thread after
+its MLFQS fields have been initialized. `thread_create()` copies `nice` and
+`recent_cpu` from the parent and recalculates the child's priority before it
+becomes ready. It recognizes creation of the idle thread through its function
+pointer and preserves that thread's `PRI_MIN` priority.
+
+Review found that `thread_init()` accidentally contained two copies of the
+initial thread's status assignment and TID allocation. That would allocate two
+IDs and discard the first. With explicit user permission, the assistant
+removed the duplicate pair. A forced build completed successfully, and
+`priority-preempt`, `priority-donate-chain`, and `alarm-priority` passed under
+QEMU. No MLFQS test is expected to pass yet because public APIs and periodic
+updates remain incomplete.
+
+## MLFQS nice API
+
+Status: implemented and build-checked; full MLFQS behavior still depends on
+the periodic scheduler updates.
+
+`thread_get_nice()` returns the current thread's stored `nice` integer.
+`thread_set_nice()` validates the range -20 through 20, changes the current
+thread's value with interrupts disabled, and immediately recalculates its
+priority when MLFQS is enabled. It sorts and examines `ready_list`, records
+whether a strictly higher-priority thread is ready, restores the previous
+interrupt level, and yields when required. In normal priority mode, storing a
+nice value does not alter manual or donated priority.
+
+The normal build succeeds, `git diff --check` reports no whitespace errors,
+and the existing `priority-preempt`, `priority-change`, and
+`priority-donate-chain` regression results remain current. The MLFQS nice
+tests are not yet meaningful because recent-CPU and timer updates remain
+unimplemented.
+
+## MLFQS public value getters
+
+Status: implemented and build-checked. Their returned values will remain zero
+because nothing changes `load_avg` or `recent_cpu` until periodic updates are
+added.
+
+`thread_get_load_avg()` multiplies the system fixed-point load average by 100
+and converts it to the nearest integer. `thread_get_recent_cpu()` performs the
+same conversion for the current thread's recent-CPU value. Multiplication
+comes before integer conversion so two decimal places are preserved. For
+example, a fixed-point value representing 1.75 becomes integer 175 instead of
+being rounded to 2 first. The scale of 16384 is the internal binary fixed-point
+representation; 100 is the public API scale used to return two decimal places
+through an integer result.
+
+The normal Pintos build remains successful and `git diff --check` reports no
+whitespace errors after these getter implementations.
+
+## Per-tick recent CPU accounting
+
+Status: implemented and build-verified; once-per-second recent-CPU decay is
+not yet implemented.
+
+`thread_tick()` now increases the running thread's fixed-point `recent_cpu` by
+one on every timer tick when MLFQS is enabled. It uses `fp_add_int()` because
+adding raw integer 1 to a 17.14 value would add only 1/16384, not one whole CPU
+tick. The idle thread is excluded because idle time is not CPU usage by a
+competing thread. The function already executes in timer interrupt context,
+so the update does not require another interrupt-disable section.
+
+The project builds successfully after this change. `priority-preempt`,
+`priority-donate-chain`, and `alarm-priority` were freshly run with QEMU and
+passed. The comment above the new block currently has two extra leading spaces
+and should be aligned with the other function-body comments before commit.
+
+## Once-per-second load average
+
+Status: implemented and verified by `mlfqs-load-1`.
+
+`thread.c` now includes `devices/timer.h` for `timer_ticks()` and `TIMER_FREQ`.
+On exact one-second boundaries, `thread_tick()` calls
+`mlfqs_update_load_avg()` when MLFQS is enabled. The helper counts threads in
+`ready_list` and adds the running thread unless it is the idle thread. Blocked
+and sleeping threads are not counted.
+
+The implementation evaluates the required moving-average formula in the
+algebraically equivalent fixed-point form:
+
+```text
+load_avg = (59 * load_avg + ready_threads) / 60
+```
+
+This avoids introducing separate rounded approximations for 59/60 and 1/60.
+The helper requires interrupts to be disabled; it is currently called from
+timer interrupt context.
+
+The current QEMU results for `mlfqs-load-1` and `mlfqs-load-60` are PASS. The
+single-thread test verifies that the load average crosses 0.5 after 41 seconds
+and decays to 0.44 after ten idle seconds. The 60-thread test verifies the
+ready-thread count and load calculation under a much larger competing
+workload. Its earlier FAIL result was stale; rerunning it after the completed
+periodic MLFQS implementation passed without another source change.
+`priority-preempt` also passed after this work.
+
+## Once-per-second recent CPU recalculation
+
+Status: implemented and verified by `mlfqs-recent-1`.
+
+`mlfqs_update_recent_cpu()` is a `thread_foreach()` callback. It skips the
+idle thread and computes the coefficient `(2 * load_avg) / (2 * load_avg + 1)`
+using fixed-point operations, then updates each thread with `coefficient *
+recent_cpu + nice`. Because it traverses `all_list`, running, ready, sleeping,
+and synchronization-blocked threads are all updated.
+
+At each exact one-second boundary, `thread_tick()` first recalculates
+`load_avg` and then calls `thread_foreach()` to recalculate every thread's
+`recent_cpu` using that new load value. The timer handler already has
+interrupts disabled, satisfying the traversal and helper requirements.
+
+The complete 180-second `mlfqs-recent-1` QEMU test passed. This jointly
+verifies per-tick charging, once-per-second timing and decay, fixed-point
+arithmetic, all-thread traversal, and `thread_get_recent_cpu()` output scaling.
+
+## Every-fourth-tick MLFQS priority update
+
+Status: implemented, build-verified, and tested.
+
+On every fourth timer tick, `thread_tick()` calls `thread_foreach()` with
+`mlfqs_update_priority_all()` to recalculate the priority of every non-idle
+thread. Because ready threads may now have different priorities, it then sorts
+`ready_list` with `thread_priority_more()`. If the first ready thread has a
+higher priority than the running thread, `intr_yield_on_return()` requests a
+context switch after the timer interrupt finishes.
+
+`thread_priority_more()` is defined later in `thread.c`, so a static forward
+declaration was added near the other helper declarations. In C, the compiler
+must know a function's declaration before the function is used as the
+comparator argument to `list_sort()`.
+
+The four-tick update remains inside `if (thread_mlfqs)`, so normal priority
+scheduling is unchanged. The project builds successfully, `git diff --check`
+passes, and the QEMU tests `priority-preempt`, `mlfqs-fair-2`, and
+`mlfqs-nice-2` pass.
+
+## Ignoring manual priority changes under MLFQS
+
+Status: implemented, build-verified, and tested.
+
+`thread_set_priority()` now returns immediately when `thread_mlfqs` is true.
+MLFQS owns `priority` through its formula, so a caller-supplied priority must
+not overwrite either the calculated effective priority or the normal
+scheduler's `base_priority`. The guard runs before interrupts are disabled and
+before any priority or donation state is changed.
+
+The project builds successfully after this integration change. The QEMU tests
+`priority-change` in normal scheduling mode and `mlfqs-nice-2` in MLFQS mode
+both pass.
+
+## Complete Project 1 regression suite
+
+Status: all 27 supplied tests pass under QEMU.
+
+The complete `make check` suite was run after the MLFQS integration work. All
+six alarm tests, twelve normal priority/donation tests, and nine MLFQS tests
+passed. This includes the larger `mlfqs-load-60`, `mlfqs-load-avg`,
+`mlfqs-fair-20`, `mlfqs-nice-10`, and `mlfqs-block` workloads. No source-code
+change was required while running the final suite.
+
 Reference: [Johns Hopkins Pintos scheduler appendix, section B.6](https://jhuopsys.github.io/spring2026/assign/pintos/pintos_8.html).
 The online appendix was consulted because the originally supplied local PDF
 path was unavailable during the preceding review; it is supplementary and
@@ -647,18 +825,13 @@ does not replace any course-specific requirements in the user's PDF.
 
 Continue in small, tested stages:
 
-1. Implement a helper that calculates and clamps one thread's MLFQS priority
-   from `recent_cpu` and `nice`, then use it during MLFQS initialization.
-2. Implement MLFQS formulas, timer updates, and public getters/setters
-   incrementally, preserving normal priority scheduling when MLFQS is off.
-3. Continue scheduling edge-case review and targeted verification alongside
-   the full regression tests before submission.
-4. Complete the required `src/threads/DESIGNDOC` as work progresses.
+1. Review and clean the edited code to match Pintos formatting conventions.
+2. Complete the required `src/threads/DESIGNDOC`.
+3. Run one final `make check` after any cleanup or documentation-related code
+   edits, then prepare the submission commit.
 
 ## Work not yet implemented
 
-- MLFQS state fields and initialization
-- Advanced 4.4BSD/MLFQS scheduler
 - Final Project 1 `DESIGNDOC`
 
 ## Code-quality cleanup before submission
